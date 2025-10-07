@@ -228,7 +228,6 @@ static int send_ack(uint16_t port, struct rte_mbuf *rx_pkt,
                     uint16_t flow_id, uint32_t ack_num) {
     struct rte_mbuf *ack = rte_pktmbuf_alloc(mbuf_pool);
     if (ack == NULL) {
-        printf("[DEBUG SERVER] Failed to allocate ACK mbuf\n");
         return -1;
     }
 
@@ -241,12 +240,7 @@ static int send_ack(uint16_t port, struct rte_mbuf *rx_pkt,
                                                           sizeof(struct rte_ether_hdr));
     struct rte_udp_hdr *rx_udp = rte_pktmbuf_mtod_offset(rx_pkt, struct rte_udp_hdr *,
                                                           sizeof(struct rte_ether_hdr) + 
-                                                          sizeof(struct rte_ipv4_hdr));
-
-    printf("[DEBUG SERVER] Sending ACK to MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           rx_eth->src_addr.addr_bytes[0], rx_eth->src_addr.addr_bytes[1],
-           rx_eth->src_addr.addr_bytes[2], rx_eth->src_addr.addr_bytes[3],
-           rx_eth->src_addr.addr_bytes[4], rx_eth->src_addr.addr_bytes[5]);                                                 
+                                                          sizeof(struct rte_ipv4_hdr));                                               
 
     /* Ethernet header */
     struct rte_ether_hdr *eth_h_ack = (struct rte_ether_hdr *)ptr;
@@ -284,9 +278,6 @@ static int send_ack(uint16_t port, struct rte_mbuf *rx_pkt,
     ptr += sizeof(*udp_h_ack);
     header_size += sizeof(*udp_h_ack);
 
-    printf("[DEBUG SERVER] ACK UDP ports: %u -> %u\n", 
-           rte_be_to_cpu_16(udp_h_ack->src_port), rte_be_to_cpu_16(udp_h_ack->dst_port));
-
     /* Sliding header (ACK) */
     struct sliding_hdr *sld_h_ack = (struct sliding_hdr *)ptr;
     sld_h_ack->seq_num = 0;
@@ -294,9 +285,6 @@ static int send_ack(uint16_t port, struct rte_mbuf *rx_pkt,
     sld_h_ack->flow_id = rte_cpu_to_be_16(flow_id);
     sld_h_ack->flags = rte_cpu_to_be_16(FLAG_ACK);
     sld_h_ack->timestamp = 0;
-
-    printf("[DEBUG SERVER] Sending ACK: flow_id=%u, ack_num=%u, flags=0x%x\n", 
-           flow_id, ack_num, FLAG_ACK);
 
     ack->l2_len = RTE_ETHER_HDR_LEN;
     ack->l3_len = sizeof(struct rte_ipv4_hdr);
@@ -384,12 +372,10 @@ static __rte_noreturn void lcore_main(void) {
                     fs->packets_acked++;
                 } else if (seq_num < fs->expected_seq) {
                     // Duplicate packet -> send duplicate ACK
-					printf("[DEBUG] Send duplicate ACK");
                     send_ack(port, pkt, flow_id, fs->expected_seq);
                     fs->packets_acked++;
                 } else {
                     // Out of order packet -> send current expected ACK
-					printf("[DEBUG] Send out of order ACK");
                     send_ack(port, pkt, flow_id, fs->expected_seq);
                     fs->packets_acked++;
                 }
