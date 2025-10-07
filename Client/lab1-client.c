@@ -236,11 +236,9 @@ static int parse_ack_packet(struct rte_mbuf *pkt, uint16_t *flow_id,
     struct rte_ether_addr mac_addr = {};
     rte_eth_macaddr_get(1, &mac_addr);
     if (!rte_is_same_ether_addr(&mac_addr, &eth_hdr->dst_addr)) {
-        printf("[DEBUG] ACK packet MAC mismatch\n");
         return -1;
     }
     if (eth_hdr->ether_type != rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4)) {
-        printf("[DEBUG] ACK packet not IPv4, type: 0x%x\n", rte_be_to_cpu_16(eth_hdr->ether_type));
         return -1;
     }
 
@@ -248,24 +246,17 @@ static int parse_ack_packet(struct rte_mbuf *pkt, uint16_t *flow_id,
     p += sizeof(*ip_hdr);
     
     if (ip_hdr->next_proto_id != IPPROTO_UDP) {
-        printf("[DEBUG] ACK packet not UDP, proto: %d\n", ip_hdr->next_proto_id);
         return -1;
     }
 
     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(p);
     p += sizeof(*udp_hdr);
 
-    printf("[DEBUG] Received packet on UDP port %u -> %u\n", 
-           rte_be_to_cpu_16(udp_hdr->src_port), rte_be_to_cpu_16(udp_hdr->dst_port));
-
     struct sliding_hdr *sld_hdr = (struct sliding_hdr *)(p);
     
     *flow_id = rte_be_to_cpu_16(sld_hdr->flow_id);
     *ack_num = rte_be_to_cpu_32(sld_hdr->ack_num);
     *flags = rte_be_to_cpu_16(sld_hdr->flags);
-    
-    printf("[DEBUG] Parsed ACK: flow_id=%u, ack_num=%u, flags=0x%x\n", 
-           *flow_id, *ack_num, *flags);
 
     return 0;
 }
@@ -641,8 +632,6 @@ static __rte_noreturn void lcore_main() {
                 uint32_t remaining_bytes = flow_size - (fs->packets_sent * packet_len);
                 uint32_t send_len = (remaining_bytes < packet_len) ? remaining_bytes : packet_len;
                 
-                printf("[DEBUG] Send data packet: flow_id=%u, seq_num=%u, len=%u\n", 
-                       current_flow, fs->next_seq_num, send_len);
                 if (send_data_packet(port, current_flow, fs, payload, send_len) < 0) {
                     break;
                 }
@@ -652,7 +641,6 @@ static __rte_noreturn void lcore_main() {
                     struct rte_mbuf *rx_pkts[BURST_SIZE];
                     uint16_t nb_rx = rte_eth_rx_burst(port, 0, rx_pkts, BURST_SIZE);
                     if (nb_rx > 0) {
-                        printf("[DEBUG] *** Received %u packets immediately after TX ***\n", nb_rx);
                         for (uint16_t j = 0; j < nb_rx; j++) {
                             uint16_t fid;
                             uint32_t anum;
@@ -672,9 +660,6 @@ static __rte_noreturn void lcore_main() {
 
         // Process ACKs
         uint16_t nb_rx = rte_eth_rx_burst(port, 0, pkts, BURST_SIZE);
-        if (nb_rx > 0) {
-            printf("[DEBUG] *** Received %u packets from port %u ***\n", nb_rx, port);
-        }
 
         // Also check stats
         static uint64_t last_stat_check = 0;
@@ -682,29 +667,19 @@ static __rte_noreturn void lcore_main() {
         if (now_cycles - last_stat_check > rte_get_timer_hz()) {  // Every second
             struct rte_eth_stats stats;
             rte_eth_stats_get(port, &stats);
-            printf("[DEBUG] Port %u stats: ipackets=%lu, opackets=%lu, ierrors=%lu, oerrors=%lu\n",
-                   port, stats.ipackets, stats.opackets, stats.ierrors, stats.oerrors);
             last_stat_check = now_cycles;
         }
 
-        printf("[DEBUG] Received %u ACK packets\n", nb_rx);
         for (uint16_t i = 0; i < nb_rx; i++) {
             uint16_t flow_id;
             uint32_t ack_num;
             uint16_t flags;
             
             if (parse_ack_packet(pkts[i], &flow_id, &ack_num, &flags) == 0) {
-                printf("[DEBUG] Valid ACK packet parsed\n");
                 if (flow_id < flow_num && (flags & FLAG_ACK)) {
-                    printf("[DEBUG] Processing ACK for flow %u\n", flow_id);
                     process_ack(&flow_states[flow_id], ack_num);
-                } else {
-                    printf("[DEBUG] ACK rejected: flow_id=%u (max=%d), flags=0x%x\n", 
-                           flow_id, flow_num, flags);
-                }
-            } else {
-                printf("[DEBUG] Failed to parse ACK packet\n");
-            }
+                } 
+            } 
             rte_pktmbuf_free(pkts[i]);
         }
 
