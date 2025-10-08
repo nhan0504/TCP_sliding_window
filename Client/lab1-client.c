@@ -25,8 +25,10 @@
 #define MBUF_CACHE_SIZE 512
 #define BURST_SIZE 128
 
-#define TIMEOUT_US 10000
+#define TIMEOUT_US 200000
 #define MAX_RETRIES 10
+#define BASE_TIMEOUT_US 50000   // 50ms base
+#define MAX_TIMEOUT_US 500000  
 
 /* Flags */
 #define FLAG_SYN 0x01
@@ -73,9 +75,9 @@ static struct rte_ether_addr my_eth;
 static size_t message_size = 1000;
 static uint32_t seconds = 1;
 
-size_t window_len = 1024;
+size_t window_len = 512;
 
-int flow_size = 10000;
+long flow_size = 10000;
 int packet_len = 1400;
 int flow_num = 1;
 
@@ -195,16 +197,23 @@ static void process_ack(struct flow_state *fs, uint32_t ack_num) {
 
 static void check_timeouts(uint16_t port, struct flow_state *fs, uint16_t flow_id) {
     uint64_t now = rte_get_timer_cycles();
-    uint64_t timeout_cycles = (TIMEOUT_US * rte_get_timer_hz()) / 1000000;
 
     for (uint16_t i = 0; i < fs->window_count; i++) {
         uint16_t idx = (fs->window_start + i) % window_len;
         struct window_entry *entry = &fs->window[idx];
 
+        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 500ms
+        uint64_t timeout_us = BASE_TIMEOUT_US * (1 << entry->retries);
+        if (timeout_us > MAX_TIMEOUT_US) timeout_us = MAX_TIMEOUT_US;
+        
+        uint64_t timeout_cycles = (timeout_us * rte_get_timer_hz()) / 1000000;
+
         if (!entry->acked && (now - entry->send_time) > timeout_cycles) {
             if (entry->retries >= MAX_RETRIES) {
                 continue;
             }
+
+            printf("[TIMEOUT] Flow %u, seq %u, retry %u\n", flow_id, entry->seq_num, entry->retries);
 
             // Retransmit the packet
             if (entry->pkt) {
@@ -474,7 +483,7 @@ static __rte_noreturn void lcore_main() {
         flow_states[i].end_time = 0;
     }
 
-    printf("Starting transmission: %d flows, %d bytes per flow, %d bytes per packet\n",
+    printf("Starting transmission: %d flows, %ld bytes per flow, %d bytes per packet\n",
            flow_num, flow_size, packet_len);
     printf("Total packets per flow: %u, Window size: %zu\n", total_packets_per_flow, window_len);
 
@@ -581,24 +590,6 @@ static __rte_noreturn void lcore_main() {
             last_timeout_check = now_cycles;
         }
 
-        // Print progress every second
-        uint64_t now = raw_time();
-        if (now - last_print > 1000000000ULL) {
-            uint32_t total_sent = 0;
-            for (int f = 0; f < flow_num; f++) {
-                total_sent += flow_states[f].packets_sent;
-            }
-            uint32_t pps = total_sent - last_total_sent;
-            
-            printf("Progress: ");
-            for (int f = 0; f < flow_num; f++) {
-                printf("Flow %d: %u/%u ", f, flow_states[f].packets_acked, 
-                       flow_states[f].total_packets);
-            }
-            printf("| PPS: %u\n", pps);
-            last_print = now;
-            last_total_sent = total_sent;
-        }
     }
 
     printf("\nAll packets sent. Waiting for final ACKs...\n");
@@ -656,7 +647,7 @@ static __rte_noreturn void lcore_main() {
             flow_states[f].end_time = raw_time();
         }
     }
-    
+
     uint64_t end_time = raw_time();
     double total_time_sec = (end_time - start_time) / 1e9;
 
@@ -726,7 +717,7 @@ int main(int argc, char *argv[])
 
     if (argc == 3) {
         flow_num = (int) atoi(argv[1]);
-        flow_size =  (int) atoi(argv[2]);
+        flow_size = atol(argv[2]);
     } else {
         printf( "usage: ./lab1-client <flow_num> <flow_size>\n");
         return 1;
