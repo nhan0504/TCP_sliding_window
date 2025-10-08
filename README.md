@@ -6,11 +6,11 @@
 ## Protocol Design
 - **Flow size unit**: Bytes 
 - **ACK strategy**: Cumulative ACKs only so out of order ACK won't be acknowledge
-- **Window size**: 10 packets at most per window
+- **Window size**: 512 packets at most per window
 - **Maximum flows**: Supports up to 8 concurrent flows
-- **Packet size**: Fixed at 1000 bytes per packet
-- **Timeout**: 100ms for retransmission
-- **Maximum retries**: 5 attempts per packet
+- **Packet size**: Fixed at 1400 bytes per packet
+- **Timeout**: 50ms as base retransmission with exponential backoff
+- **Maximum retries**: 10 attempts per packet
 
 ## Network Configuration
 - **Port usage**: Uses DPDK port 1 (second physical interface)
