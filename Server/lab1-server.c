@@ -13,12 +13,12 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
+#define RX_RING_SIZE 8192
+#define TX_RING_SIZE 8192
 
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
-#define BURST_SIZE 32
+#define NUM_MBUFS 65536
+#define MBUF_CACHE_SIZE 512
+#define BURST_SIZE 128
 #define PORT_NUM 4
 
 #define MAX_FLOWS 8
@@ -294,12 +294,10 @@ static int send_ack(uint16_t port, struct rte_mbuf *rx_pkt,
 
     int nb_tx = rte_eth_tx_burst(port, 0, &ack, 1);
     if (nb_tx < 1) {
-        printf("[DEBUG SERVER] Failed to send ACK via tx_burst\n");
         rte_pktmbuf_free(ack);
         return -1;
     }
 
-    printf("[DEBUG SERVER] ACK sent successfully via port %u\n", port);
     return 0;
 }
 
