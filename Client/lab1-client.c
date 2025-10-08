@@ -18,17 +18,15 @@
 // #define PKT_TX_IPV4          (1ULL << 55)
 // #define PKT_TX_IP_CKSUM      (1ULL << 54)
 
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
+#define RX_RING_SIZE 8192
+#define TX_RING_SIZE 8192
 
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
-#define BURST_SIZE 32
-uint32_t NUM_PING = 100;
+#define NUM_MBUFS 65536
+#define MBUF_CACHE_SIZE 512
+#define BURST_SIZE 128
 
-#define WINDOW_SIZE 10
-#define TIMEOUT_US 100000  
-#define MAX_RETRIES 5
+#define TIMEOUT_US 10000
+#define MAX_RETRIES 10
 
 /* Flags */
 #define FLAG_SYN 0x01
@@ -59,7 +57,6 @@ struct flow_state {
     uint32_t send_base;           // Oldest unacked packet
     uint32_t next_seq_num;        // Next sequence number
     struct window_entry *window;
-    // struct window_entry window[WINDOW_SIZE];
     uint16_t window_start;
     uint16_t window_count;
     bool connected;
@@ -76,10 +73,10 @@ static struct rte_ether_addr my_eth;
 static size_t message_size = 1000;
 static uint32_t seconds = 1;
 
-size_t window_len = 10;
+size_t window_len = 1024;
 
 int flow_size = 10000;
-int packet_len = 1000;
+int packet_len = 1400;
 int flow_num = 1;
 
 /* Flow states */
@@ -282,7 +279,7 @@ static void process_ack(struct flow_state *fs, uint32_t ack_num) {
             entry->acked = true;
             
             // Slide window
-            fs->window_start = (fs->window_start + 1) % WINDOW_SIZE;
+            fs->window_start = (fs->window_start + 1) % window_len;
             fs->window_count--;
             fs->send_base = ack_num;
             fs->packets_acked++;
@@ -297,7 +294,7 @@ static void check_timeouts(uint16_t port, struct flow_state *fs, uint16_t flow_i
     uint64_t timeout_cycles = (TIMEOUT_US * rte_get_timer_hz()) / 1000000;
 
     for (uint16_t i = 0; i < fs->window_count; i++) {
-        uint16_t idx = (fs->window_start + i) % WINDOW_SIZE;
+        uint16_t idx = (fs->window_start + i) % window_len;
         struct window_entry *entry = &fs->window[idx];
 
         if (!entry->acked && (now - entry->send_time) > timeout_cycles) {
@@ -418,7 +415,7 @@ static int send_data_packet(uint16_t port, uint16_t flow_id,
     }
 
     // Add to window
-    uint16_t idx = (fs->window_start + fs->window_count) % WINDOW_SIZE;
+    uint16_t idx = (fs->window_start + fs->window_count) % window_len;
     fs->window[idx].seq_num = fs->next_seq_num;
     fs->window[idx].pkt = clone_pkt;
     fs->window[idx].send_time = rte_get_timer_cycles();
@@ -626,7 +623,7 @@ static __rte_noreturn void lcore_main() {
             }
 
             // Send packets if window has space
-            while (fs->window_count < WINDOW_SIZE && 
+            while (fs->window_count < window_len && 
                    fs->packets_sent < fs->total_packets) {
                 
                 uint32_t remaining_bytes = flow_size - (fs->packets_sent * packet_len);
@@ -747,7 +744,7 @@ static __rte_noreturn void lcore_main() {
 
     // Cleanup
     for (int f = 0; f < flow_num; f++) {
-        for (int i = 0; i < WINDOW_SIZE; i++) {
+        for (int i = 0; i < window_len; i++) {
             if (flow_states[f].window[i].pkt) {
                 rte_pktmbuf_free(flow_states[f].window[i].pkt);
             }
@@ -778,7 +775,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    NUM_PING = flow_size / packet_len;
 
 	/* Initializion the Environment Abstraction Layer (EAL). 8< */
 	int ret = rte_eal_init(argc, argv);
