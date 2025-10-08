@@ -502,109 +502,161 @@ static __rte_noreturn void lcore_main() {
     bool all_done = false;
     uint32_t current_flow = 0;
     uint64_t last_print = raw_time();
+    uint32_t last_total_sent = 0;
 
     while (!all_done) {
         all_done = true;
 
-        // Round-robin through flows
-        for (int f = 0; f < flow_num; f++) {
-            current_flow = (current_flow + 1) % flow_num;
-            struct flow_state *fs = &flow_states[current_flow];
-
-            // Check if this flow is done
-            if (fs->packets_sent >= fs->total_packets) {
-                if (fs->window_count == 0 && fs->end_time == 0) {
-                    fs->end_time = raw_time();
-                }
-                continue;
-            }
-
-            all_done = false;
-
-            // Record start time for first packet
-            if (fs->packets_sent == 0) {
-                fs->start_time = raw_time();
-            }
-
-            // Send packets if window has space
-            while (fs->window_count < window_len && 
-                   fs->packets_sent < fs->total_packets) {
-                
-                uint32_t remaining_bytes = flow_size - (fs->packets_sent * packet_len);
-                uint32_t send_len = (remaining_bytes < packet_len) ? remaining_bytes : packet_len;
-                
-                if (send_data_packet(port, current_flow, fs, payload, send_len) < 0) {
-                    break;
-                }
-
-                // Immediately poll for ACK after sending
-                for (int poll_try = 0; poll_try < 10; poll_try++) {
-                    struct rte_mbuf *rx_pkts[BURST_SIZE];
-                    uint16_t nb_rx = rte_eth_rx_burst(port, 0, rx_pkts, BURST_SIZE);
-                    if (nb_rx > 0) {
-                        for (uint16_t j = 0; j < nb_rx; j++) {
-                            uint16_t fid;
-                            uint32_t anum;
-                            uint16_t flg;
-                            if (parse_ack_packet(rx_pkts[j], &fid, &anum, &flg) == 0) {
-                                if (fid < flow_num && (flg & FLAG_ACK)) {
-                                    process_ack(&flow_states[fid], anum);
-                                }
-                            }
-                            rte_pktmbuf_free(rx_pkts[j]);
-                        }
-                    }
-                    rte_delay_us_block(100); // Wait 100 microseconds
-                }
-            }
-        }
-
-        // Process ACKs
-        uint16_t nb_rx = rte_eth_rx_burst(port, 0, pkts, BURST_SIZE);
-
-        // Also check stats
-        static uint64_t last_stat_check = 0;
-        uint64_t now_cycles = rte_get_timer_cycles();
-        if (now_cycles - last_stat_check > rte_get_timer_hz()) {  // Every second
-            struct rte_eth_stats stats;
-            rte_eth_stats_get(port, &stats);
-            last_stat_check = now_cycles;
-        }
-
-        for (uint16_t i = 0; i < nb_rx; i++) {
-            uint16_t flow_id;
-            uint32_t ack_num;
-            uint16_t flags;
+        // AGGRESSIVE SENDING: Fill all windows before processing ACKs
+        for (int send_round = 0; send_round < 100; send_round++) {  // Increased from 1
+            bool sent_anything = false;
             
-            if (parse_ack_packet(pkts[i], &flow_id, &ack_num, &flags) == 0) {
-                if (flow_id < flow_num && (flags & FLAG_ACK)) {
-                    process_ack(&flow_states[flow_id], ack_num);
-                } 
-            } 
-            rte_pktmbuf_free(pkts[i]);
+            for (int f = 0; f < flow_num; f++) {
+                current_flow = (current_flow + 1) % flow_num;
+                struct flow_state *fs = &flow_states[current_flow];
+
+                // Check if this flow is done
+                if (fs->packets_sent >= fs->total_packets) {
+                    if (fs->window_count == 0 && fs->end_time == 0) {
+                        fs->end_time = raw_time();
+                    }
+                    continue;
+                }
+
+                all_done = false;
+
+                // Record start time for first packet
+                if (fs->packets_sent == 0) {
+                    fs->start_time = raw_time();
+                }
+
+                // Send packets aggressively to fill window
+                while (fs->window_count < window_len && 
+                       fs->packets_sent < fs->total_packets) {
+                    
+                    uint32_t remaining_bytes = flow_size - (fs->packets_sent * packet_len);
+                    uint32_t send_len = (remaining_bytes < packet_len) ? remaining_bytes : packet_len;
+                    
+                    if (send_data_packet(port, current_flow, fs, payload, send_len) < 0) {
+                        break;
+                    }
+                    sent_anything = true;
+                }
+            }
+            
+            // If no flow could send, break early
+            if (!sent_anything) break;
         }
 
-        // Check timeouts for all flows
-        for (int f = 0; f < flow_num; f++) {
-            if (flow_states[f].packets_sent < flow_states[f].total_packets ||
-                flow_states[f].window_count > 0) {
-                check_timeouts(port, &flow_states[f], f);
+        // BATCH PROCESS ACKs (process multiple bursts)
+        for (int ack_round = 0; ack_round < 10; ack_round++) {
+            uint16_t nb_rx = rte_eth_rx_burst(port, 0, pkts, BURST_SIZE);
+            
+            if (nb_rx == 0) break;
+
+            for (uint16_t i = 0; i < nb_rx; i++) {
+                uint16_t flow_id;
+                uint32_t ack_num;
+                uint16_t flags;
+                
+                if (parse_ack_packet(pkts[i], &flow_id, &ack_num, &flags) == 0) {
+                    if (flow_id < flow_num && (flags & FLAG_ACK)) {
+                        process_ack(&flow_states[flow_id], ack_num);
+                    } 
+                }
+                rte_pktmbuf_free(pkts[i]);
             }
+        }
+
+        // Check timeouts (but not too frequently)
+        static uint64_t last_timeout_check = 0;
+        uint64_t now_cycles = rte_get_timer_cycles();
+        if (now_cycles - last_timeout_check > rte_get_timer_hz() / 100) {  // Check every 10ms
+            for (int f = 0; f < flow_num; f++) {
+                if (flow_states[f].packets_sent < flow_states[f].total_packets ||
+                    flow_states[f].window_count > 0) {
+                    check_timeouts(port, &flow_states[f], f);
+                }
+            }
+            last_timeout_check = now_cycles;
         }
 
         // Print progress every second
         uint64_t now = raw_time();
         if (now - last_print > 1000000000ULL) {
+            uint32_t total_sent = 0;
+            for (int f = 0; f < flow_num; f++) {
+                total_sent += flow_states[f].packets_sent;
+            }
+            uint32_t pps = total_sent - last_total_sent;
+            
             printf("Progress: ");
             for (int f = 0; f < flow_num; f++) {
                 printf("Flow %d: %u/%u ", f, flow_states[f].packets_acked, 
                        flow_states[f].total_packets);
             }
-            printf("\n");
+            printf("| PPS: %u\n", pps);
             last_print = now;
+            last_total_sent = total_sent;
         }
     }
 
+    printf("\nAll packets sent. Waiting for final ACKs...\n");
+    
+    for (int wait_round = 0; wait_round < 1000; wait_round++) {
+        bool all_acked = true;
+        
+        // Process remaining ACKs
+        for (int ack_round = 0; ack_round < 10; ack_round++) {
+            uint16_t nb_rx = rte_eth_rx_burst(port, 0, pkts, BURST_SIZE);
+            
+            if (nb_rx == 0) break;
+
+            for (uint16_t i = 0; i < nb_rx; i++) {
+                uint16_t flow_id;
+                uint32_t ack_num;
+                uint16_t flags;
+                
+                if (parse_ack_packet(pkts[i], &flow_id, &ack_num, &flags) == 0) {
+                    if (flow_id < flow_num && (flags & FLAG_ACK)) {
+                        process_ack(&flow_states[flow_id], ack_num);
+                    }
+                }
+                rte_pktmbuf_free(pkts[i]);
+            }
+        }
+        
+        // Check if all flows have no outstanding packets
+        for (int f = 0; f < flow_num; f++) {
+            if (flow_states[f].window_count > 0) {
+                all_acked = false;
+            } else if (flow_states[f].end_time == 0) {
+                flow_states[f].end_time = raw_time();
+            }
+        }
+        
+        // Retransmit any timed-out packets
+        for (int f = 0; f < flow_num; f++) {
+            if (flow_states[f].window_count > 0) {
+                check_timeouts(port, &flow_states[f], f);
+            }
+        }
+        
+        if (all_acked) {
+            printf("All ACKs received!\n");
+            break;
+        }
+        
+        rte_delay_us_block(1000);  // Wait 1ms between checks
+    }
+    
+    // Ensure all end times are set
+    for (int f = 0; f < flow_num; f++) {
+        if (flow_states[f].end_time == 0) {
+            flow_states[f].end_time = raw_time();
+        }
+    }
+    
     uint64_t end_time = raw_time();
     double total_time_sec = (end_time - start_time) / 1e9;
 
@@ -653,6 +705,7 @@ static __rte_noreturn void lcore_main() {
                 rte_pktmbuf_free(flow_states[f].window[i].pkt);
             }
         }
+        free(flow_states[f].window);
     }
     free(flow_states);
     free(payload);
