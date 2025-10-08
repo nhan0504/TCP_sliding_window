@@ -213,8 +213,6 @@ static void check_timeouts(uint16_t port, struct flow_state *fs, uint16_t flow_i
                 continue;
             }
 
-            printf("[TIMEOUT] Flow %u, seq %u, retry %u\n", flow_id, entry->seq_num, entry->retries);
-
             // Retransmit the packet
             if (entry->pkt) {
                 struct rte_mbuf *dup_pkt = rte_pktmbuf_clone(entry->pkt, mbuf_pool);
